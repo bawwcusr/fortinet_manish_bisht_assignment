@@ -32,6 +32,7 @@ Two services:
 | Logging | `structlog` | Structured JSON logs |
 | Config | `pydantic-settings` | 12-factor env config |
 | DB | PostgreSQL (two DBs: `scheduler_db`, `executor_db`) | Production-grade, matches spec |
+| Migrations | Alembic (one migration tree per service) | Versioned schema, production-grade |
 | Tests | `pytest`, `pytest-asyncio`, `httpx` ASGITransport | Unit + integration + e2e |
 | Containers | Docker + docker-compose | Required by spec |
 
@@ -106,6 +107,15 @@ service layer — no business logic duplicated in job callbacks.
 Portability: use SQLAlchemy generic `JSON` (not `JSONB`) and generic types so
 the suite runs on SQLite while prod uses Postgres.
 
+### Migrations (Alembic)
+
+Each service owns an independent Alembic environment (separate `alembic.ini` +
+`migrations/` tree, since the two services target separate databases). Schema is
+derived from each service's SQLAlchemy `metadata` via autogenerate, then
+hand-reviewed. Containers run `alembic upgrade head` on startup (entrypoint)
+before serving. Generic column types keep migrations runnable on both Postgres
+(prod) and SQLite (tests).
+
 ## 5. Lifecycle & data flow
 
 Status: `CREATED -> PENDING -> RUNNING -> SUCCESS | FAILED | CANCELLED`.
@@ -170,10 +180,13 @@ fault-injection case to exercise the failure path).
 
 ## 8. Testing strategy (TDD)
 
-- **Portability:** tests run on SQLite (`aiosqlite`); prod on Postgres. APScheduler
-  is not started in tests — job callbacks (execution/poll/recurrence functions)
-  are invoked directly for determinism. `httpx` mocked via `respx` or a stub
-  ASGI executor app mounted with ASGITransport.
+- **Portability:** tests run on SQLite (`aiosqlite`); prod on Postgres. The test
+  DB schema is created by running `alembic upgrade head` against the test
+  database in a session-scoped fixture (same migrations as prod — keeps schema
+  parity). APScheduler is not started in tests — job callbacks
+  (execution/poll/recurrence functions) are invoked directly for determinism.
+  `httpx` mocked via `respx` or a stub ASGI executor app mounted with
+  ASGITransport.
 - **Unit:** backoff config, recurrence next-time (cron + interval), status
   transition guard, payload validation.
 - **Integration:** API endpoints via `httpx.AsyncClient` + ASGITransport against
@@ -199,12 +212,14 @@ Each slice: red test -> implement -> green; each leaves a working thread.
 6. **Recurrence**: HOURLY/DAILY/CUSTOM_CRON next-time + child task creation on
    success.
 7. **Cancellation**: cancel endpoint + job removal.
-8. **Cross-cutting**: structured logging, health checks, Dockerfiles +
-   docker-compose, seed script (4 sample tasks), README + Swagger polish.
+8. **Cross-cutting**: Alembic migrations per service, structured logging, health
+   checks, Dockerfiles + docker-compose (entrypoint runs `alembic upgrade head`),
+   seed script (4 sample tasks), README + Swagger polish.
 
 ## 10. Deliverables
 
 - Source for both services, `uv`-managed (`pyproject.toml` + `uv.lock`).
+- Alembic migration tree per service (`alembic upgrade head` on container start).
 - `Dockerfile` per service + `docker-compose.yml` (postgres + both services).
 - `README.md`: setup, run, architecture, assumptions.
 - Swagger (FastAPI auto) + curl examples.
@@ -215,6 +230,4 @@ Each slice: red test -> implement -> green; each leaves a working thread.
 ## 11. Out of scope (YAGNI)
 
 - AuthN/Z, multi-tenant, Prometheus metrics, rate limiting (noted as extensions).
-- Alembic migrations — use SQLAlchemy `create_all` for the assignment; Alembic
-  noted as the production next step.
 - Multi-instance scheduler HA (documented assumption above).
