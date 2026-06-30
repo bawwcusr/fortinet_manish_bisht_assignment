@@ -1,0 +1,569 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Task Automation & Scheduling System",
+    "description": "REST API collection for the Task Scheduler (port 8080) and Task Executor (port 8081) microservices.\n\n## Setup\n1. Import this collection and `local.postman_environment.json`.\n2. Select the **Task Automation — Local** environment.\n3. Start services: `docker compose up --build` (or run each service locally).\n4. Optional seed: `docker compose --profile seed run --rm seed`\n\n## Variables\n| Variable | Description |\n| --- | --- |\n| `scheduler_base_url` | Scheduler base URL (default `http://localhost:8080`) |\n| `executor_base_url` | Executor base URL (default `http://localhost:8081`) |\n| `task_id` | Set automatically after **Create Task** requests |\n| `execution_id` | Set automatically after async webhook invocations |\n| `check_url` | Set automatically from async `202` responses |\n\n## Webhook registry (executor)\n| Name | Mode |\n| --- | --- |\n| `send-welcome` | sync |\n| `notify-admin` | sync |\n| `daily-summary` | async |\n| `security-alert` | async |\n\nWhen `EXECUTOR_BASE_URL` is set on the scheduler, `POST /tasks` requires `webhook_url` = `{executor_base_url}/webhooks/{name}` for a registered `{name}`.\n\n## Task lifecycle\n`CREATED → PENDING → RUNNING → SUCCESS / FAILED` (or `CANCELLED` while non-terminal)\n\n## Error responses (scheduler)\n| Status | Meaning |\n| --- | --- |\n| `404` | Task not found |\n| `409` | Cancel on terminal task |\n| `422` | Invalid webhook or validation error |\n| `503` | APScheduler job registration failed (row rolled back) |",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "scheduler_base_url",
+      "value": "http://localhost:8080"
+    },
+    {
+      "key": "executor_base_url",
+      "value": "http://localhost:8081"
+    },
+    {
+      "key": "task_id",
+      "value": ""
+    },
+    {
+      "key": "execution_id",
+      "value": ""
+    },
+    {
+      "key": "check_url",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Scheduler Service",
+      "description": "Task scheduling API — create, list, get, and cancel scheduled webhook tasks.",
+      "item": [
+        {
+          "name": "Health",
+          "item": [
+            {
+              "name": "GET /health",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{scheduler_base_url}}/health",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["health"]
+                },
+                "description": "Liveness probe. Returns `{\"status\": \"ok\"}`."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Tasks",
+          "item": [
+            {
+              "name": "Create Task — sync webhook (send-welcome)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "    const body = pm.response.json();",
+                      "    pm.environment.set('task_id', body.id);",
+                      "    pm.test('status is PENDING', () => pm.expect(body.status).to.eql('PENDING'));",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Send Welcome Email\",\n  \"execution_time\": \"2030-01-01T10:30:00Z\",\n  \"webhook_url\": \"{{executor_base_url}}/webhooks/send-welcome\",\n  \"payload\": {\n    \"email\": \"newuser@example.com\",\n    \"template\": \"welcome\"\n  },\n  \"recurrence\": \"NONE\"\n}"
+                },
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks"]
+                },
+                "description": "Schedule a one-off task targeting a **sync** executor webhook.\n\n**Request body**\n| Field | Type | Required | Notes |\n| --- | --- | --- | --- |\n| `name` | string | yes | Human-readable task name |\n| `execution_time` | ISO-8601 datetime | yes | When to fire the webhook |\n| `webhook_url` | string | yes | Must be `{executor_base_url}/webhooks/{name}` when validation enabled |\n| `payload` | object | no | JSON body sent to the webhook |\n| `recurrence` | enum | no | `NONE`, `HOURLY`, `DAILY`, `CUSTOM_CRON` (default `NONE`) |\n| `cron_expr` | string | conditional | Required when `recurrence` is `CUSTOM_CRON` |\n| `max_retries` | integer | no | Total webhook attempt cap (default from `MAX_RETRIES` env) |\n\n**Success:** `201` with `TaskRead` body (`status`: `PENDING`)."
+              },
+              "response": []
+            },
+            {
+              "name": "Create Task — async webhook + daily recurrence",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 201) {",
+                      "    pm.environment.set('task_id', pm.response.json().id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Trigger Daily Summary Report\",\n  \"execution_time\": \"2030-01-01T06:00:00Z\",\n  \"webhook_url\": \"{{executor_base_url}}/webhooks/daily-summary\",\n  \"payload\": {\n    \"report\": \"daily\"\n  },\n  \"recurrence\": \"DAILY\"\n}"
+                },
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks"]
+                },
+                "description": "Schedule a **daily recurring** task targeting an **async** webhook (`daily-summary`).\n\nOn successful completion the scheduler creates a child task for the next day."
+              },
+              "response": []
+            },
+            {
+              "name": "Create Task — custom cron",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Security Alert (weekdays 9am)\",\n  \"execution_time\": \"2030-01-06T09:00:00Z\",\n  \"webhook_url\": \"{{executor_base_url}}/webhooks/security-alert\",\n  \"payload\": {\n    \"severity\": \"high\"\n  },\n  \"recurrence\": \"CUSTOM_CRON\",\n  \"cron_expr\": \"0 9 * * 1-5\"\n}"
+                },
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks"]
+                },
+                "description": "Schedule with `CUSTOM_CRON` recurrence. `cron_expr` is required and must be a valid cron expression (via croniter)."
+              },
+              "response": []
+            },
+            {
+              "name": "Create Task — invalid webhook (422)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Bad Webhook\",\n  \"execution_time\": \"2030-01-01T10:30:00Z\",\n  \"webhook_url\": \"{{executor_base_url}}/webhooks/unknown-hook\",\n  \"payload\": {},\n  \"recurrence\": \"NONE\"\n}"
+                },
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks"]
+                },
+                "description": "Example of webhook validation failure when `EXECUTOR_BASE_URL` is configured.\n\n**Expected:** `422` with `{\"detail\": \"unknown webhook: unknown-hook\"}` (or similar)."
+              },
+              "response": []
+            },
+            {
+              "name": "List Tasks",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks?limit=50&offset=0",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks"],
+                  "query": [
+                    {
+                      "key": "status",
+                      "value": "PENDING",
+                      "disabled": true,
+                      "description": "Filter: CREATED, PENDING, RUNNING, SUCCESS, FAILED, CANCELLED"
+                    },
+                    {
+                      "key": "limit",
+                      "value": "50",
+                      "description": "Max 500"
+                    },
+                    {
+                      "key": "offset",
+                      "value": "0"
+                    }
+                  ]
+                },
+                "description": "List tasks with optional `status` filter and pagination (`limit` ≤ 500, `offset`)."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Task",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks/{{task_id}}",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks", "{{task_id}}"]
+                },
+                "description": "Fetch a single task by ID.\n\n**Response fields (TaskRead):** `id`, `name`, `execution_time`, `webhook_url`, `payload`, `recurrence`, `cron_expr`, `status`, `max_retries`, `retry_count`, `check_url`, `parent_task_id`, `created_at`, `updated_at`\n\n**Errors:** `404` if not found."
+              },
+              "response": []
+            },
+            {
+              "name": "Cancel Task (DELETE)",
+              "request": {
+                "method": "DELETE",
+                "header": [],
+                "url": {
+                  "raw": "{{scheduler_base_url}}/tasks/{{task_id}}",
+                  "host": ["{{scheduler_base_url}}"],
+                  "path": ["tasks", "{{task_id}}"]
+                },
+                "description": "Cancel a non-terminal task. Sets `status` to `CANCELLED` and removes the APScheduler job.\n\n**Success:** `200` with updated task.\n**Errors:** `404` not found; `409` if already terminal (`SUCCESS`, `FAILED`, `CANCELLED`)."
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Executor Service",
+      "description": "Webhook simulator — registry-driven sync and async endpoints plus execution status polling.",
+      "item": [
+        {
+          "name": "Health",
+          "item": [
+            {
+              "name": "GET /health",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{executor_base_url}}/health",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["health"]
+                },
+                "description": "Liveness probe. Returns `{\"status\": \"ok\"}`."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Webhooks",
+          "item": [
+            {
+              "name": "List Webhooks (GET /webhooks)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{executor_base_url}}/webhooks",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["webhooks"]
+                },
+                "description": "Returns the webhook registry used by the scheduler for validation.\n\n**Example response:**\n```json\n{\n  \"webhooks\": {\n    \"send-welcome\": {\"mode\": \"sync\"},\n    \"notify-admin\": {\"mode\": \"sync\"},\n    \"daily-summary\": {\"mode\": \"async\"},\n    \"security-alert\": {\"mode\": \"async\"}\n  }\n}\n```"
+              },
+              "response": []
+            },
+            {
+              "name": "Invoke — send-welcome (sync)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"newuser@example.com\",\n  \"template\": \"welcome\"\n}"
+                },
+                "url": {
+                  "raw": "{{executor_base_url}}/webhooks/send-welcome",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["webhooks", "send-welcome"]
+                },
+                "description": "**Sync webhook** — holds the connection for `SYNC_DELAY_SECONDS` (default 5s), then returns `200` with `ExecutionRead`.\n\nIf execution fails (e.g. via `FAIL_ENDPOINTS`), returns `500` (scheduler treats non-2xx as failure)."
+              },
+              "response": []
+            },
+            {
+              "name": "Invoke — notify-admin (sync)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"user\": \"newuser@example.com\"\n}"
+                },
+                "url": {
+                  "raw": "{{executor_base_url}}/webhooks/notify-admin",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["webhooks", "notify-admin"]
+                },
+                "description": "**Sync webhook** — admin notification stub."
+              },
+              "response": []
+            },
+            {
+              "name": "Invoke — daily-summary (async)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 202) {",
+                      "    const body = pm.response.json();",
+                      "    pm.environment.set('check_url', body.check_url);",
+                      "    const match = body.check_url.match(/status\\/([^/]+)$/);",
+                      "    if (match) pm.environment.set('execution_id', match[1]);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"report\": \"daily\"\n}"
+                },
+                "url": {
+                  "raw": "{{executor_base_url}}/webhooks/daily-summary",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["webhooks", "daily-summary"]
+                },
+                "description": "**Async webhook** — returns `202` with:\n```json\n{\n  \"status\": \"QUEUED\",\n  \"check_url\": \"http://localhost:8081/status/<execution_id>\"\n}\n```\n\nThe scheduler polls `check_url` until `status` is `SUCCESS` or `FAILED`. Processing completes after `ASYNC_DELAY_SECONDS` (default 5s)."
+              },
+              "response": []
+            },
+            {
+              "name": "Invoke — security-alert (async)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 202) {",
+                      "    const body = pm.response.json();",
+                      "    pm.environment.set('check_url', body.check_url);",
+                      "    const match = body.check_url.match(/status\\/([^/]+)$/);",
+                      "    if (match) pm.environment.set('execution_id', match[1]);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"severity\": \"high\",\n  \"message\": \"Unusual login detected\"\n}"
+                },
+                "url": {
+                  "raw": "{{executor_base_url}}/webhooks/security-alert",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["webhooks", "security-alert"]
+                },
+                "description": "**Async webhook** — security alert stub. Set `FAIL_ENDPOINTS=security-alert` on the executor to simulate failure."
+              },
+              "response": []
+            },
+            {
+              "name": "Invoke — unknown webhook (404)",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{}"
+                },
+                "url": {
+                  "raw": "{{executor_base_url}}/webhooks/no-such-hook",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["webhooks", "no-such-hook"]
+                },
+                "description": "**Expected:** `404` with `{\"detail\": \"unknown webhook: no-such-hook\"}`."
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Status",
+          "item": [
+            {
+              "name": "Get Execution Status",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{executor_base_url}}/status/{{execution_id}}",
+                  "host": ["{{executor_base_url}}"],
+                  "path": ["status", "{{execution_id}}"]
+                },
+                "description": "Poll async execution status. Used by the scheduler after receiving `202` + `check_url`.\n\n**Response (ExecutionRead):** `id`, `endpoint`, `status` (`QUEUED` | `RUNNING` | `SUCCESS` | `FAILED`), `created_at`, `updated_at`\n\n**Errors:** `404` if execution ID unknown.\n\nRun an async webhook request first to populate `execution_id`, or paste an ID from a `check_url`."
+              },
+              "response": []
+            },
+            {
+              "name": "Get Execution Status (via check_url)",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{check_url}}",
+                  "host": ["{{check_url}}"]
+                },
+                "description": "Same as **Get Execution Status**, using the full `check_url` saved from an async `202` response."
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "End-to-end flow",
+      "description": "Suggested order: create a near-future task → list/watch status → optionally cancel.",
+      "item": [
+        {
+          "name": "1. Health — Scheduler",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{scheduler_base_url}}/health",
+              "host": ["{{scheduler_base_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Health — Executor",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{executor_base_url}}/health",
+              "host": ["{{executor_base_url}}"],
+              "path": ["health"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "3. List executor webhooks",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{executor_base_url}}/webhooks",
+              "host": ["{{executor_base_url}}"],
+              "path": ["webhooks"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Create task (fires in ~30s)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "const t = new Date(Date.now() + 30000).toISOString();",
+                  "pm.variables.set('execution_time_soon', t);"
+                ],
+                "type": "text/javascript"
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    pm.environment.set('task_id', pm.response.json().id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"E2E Welcome Email\",\n  \"execution_time\": \"{{execution_time_soon}}\",\n  \"webhook_url\": \"{{executor_base_url}}/webhooks/send-welcome\",\n  \"payload\": {\n    \"email\": \"e2e@example.com\"\n  },\n  \"recurrence\": \"NONE\"\n}"
+            },
+            "url": {
+              "raw": "{{scheduler_base_url}}/tasks",
+              "host": ["{{scheduler_base_url}}"],
+              "path": ["tasks"]
+            },
+            "description": "Creates a task scheduled 30 seconds from now. Poll **Get Task** until `status` becomes `SUCCESS`."
+          },
+          "response": []
+        },
+        {
+          "name": "5. Get task (poll until SUCCESS)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{scheduler_base_url}}/tasks/{{task_id}}",
+              "host": ["{{scheduler_base_url}}"],
+              "path": ["tasks", "{{task_id}}"]
+            },
+            "description": "Re-run after ~30s. Expect `PENDING` → `RUNNING` → `SUCCESS`."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

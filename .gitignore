@@ -21,3 +21,8 @@ htmlcov/
 .DS_Store
 .idea/
 .vscode/
+
+scripts/e2e_manual_test.sh
+scripts/load_test.py
+
+docs/
